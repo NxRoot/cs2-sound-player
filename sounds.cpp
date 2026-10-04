@@ -48,7 +48,7 @@ DWORD FindProcess(const wchar_t* name) {
 
 // ── Audio ──
 
-constexpr int kMaxEvents = 16;
+constexpr int kMaxEvents = 64;
 constexpr int kMaxSoundsPerEvent = 64;
 constexpr DWORD kMaxDecode = 16 * 1024 * 1024;
 
@@ -164,6 +164,61 @@ UINT FindDevice() {
     return WAVE_MAPPER;
 }
 
+bool LoadEventFromFolder(const wchar_t* exeDir, const wchar_t* relFolder, const char* eventName) {
+    if (gEventCount >= kMaxEvents) return false;
+
+    EventSounds& ev = gEvents[gEventCount];
+    lstrcpynA(ev.name, eventName, sizeof(ev.name));
+
+    // Single letter folder = key-triggered event
+    if (ev.name[0] && !ev.name[1]) {
+        char c = ev.name[0];
+        if (c >= 'a' && c <= 'z') ev.vkey = c - 'a' + 'A';
+        else if (c >= 'A' && c <= 'Z') ev.vkey = c;
+        else if (c >= '0' && c <= '9') ev.vkey = c;
+    }
+
+    wchar_t pattern[MAX_PATH]{};
+    lstrcpynW(pattern, exeDir, MAX_PATH);
+    lstrcatW(pattern, L"sounds\\");
+    lstrcatW(pattern, relFolder);
+    lstrcatW(pattern, L"\\*");
+
+    WIN32_FIND_DATAW fd{};
+    HANDLE hFind = FindFirstFileW(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (ev.count >= kMaxSoundsPerEvent) break;
+
+        wchar_t filePath[MAX_PATH]{};
+        lstrcpynW(filePath, exeDir, MAX_PATH);
+        lstrcatW(filePath, L"sounds\\");
+        lstrcatW(filePath, relFolder);
+        lstrcatW(filePath, L"\\");
+        lstrcatW(filePath, fd.cFileName);
+
+        if (DecodeToPCM(filePath, ev.clips[ev.count].pcm, ev.clips[ev.count].pcmLen)) {
+            char nameA[MAX_PATH]{};
+            WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, nameA, sizeof(nameA), nullptr, nullptr);
+            std::printf("[sounds]   %s/%s (%lu bytes)\n", ev.name, nameA, ev.clips[ev.count].pcmLen);
+            ++ev.count;
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+
+    if (ev.count > 0) {
+        ev.Shuffle();
+        std::printf("[sounds] %s: %d sounds\n", ev.name, ev.count);
+        ++gEventCount;
+        return true;
+    }
+    // No sounds: wipe the slot so a stale name/vkey can't leak
+    ev = EventSounds{};
+    return false;
+}
+
 bool LoadSoundsFolder() {
     wchar_t exeDir[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
@@ -187,56 +242,47 @@ bool LoadSoundsFolder() {
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (fd.cFileName[0] == L'.') continue;
-        if (gEventCount >= kMaxEvents) break;
 
-        EventSounds& ev = gEvents[gEventCount];
-        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, ev.name, sizeof(ev.name), nullptr, nullptr);
+        char eventName[64]{};
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, eventName, sizeof(eventName), nullptr, nullptr);
 
-        // Single letter folder = key-triggered event                                                                                                                                                             
-        if (ev.name[0] && !ev.name[1]) {                                                                                                                                                                          
-            char c = ev.name[0];                                                                                                                                                                                  
-            if (c >= 'a' && c <= 'z') ev.vkey = c - 'a' + 'A';                                                                                                                                                    
-            else if (c >= 'A' && c <= 'Z') ev.vkey = c;                                                                                                                                                           
-            else if (c >= '0' && c <= '9') ev.vkey = c;                                                                                                                                                           
-        } 
+        // Load the parent event (audio files directly inside the folder)
+        LoadEventFromFolder(exeDir, fd.cFileName, eventName);
 
-        // Scan for audio files inside this folder                                                                                                                                                                
-        wchar_t pattern[MAX_PATH]{};                                                                                                                                                                              
-        lstrcpynW(pattern, exeDir, MAX_PATH);                                                                                                                                                                     
-        lstrcatW(pattern, L"sounds\\");                                                                                                                                                                           
-        lstrcatW(pattern, fd.cFileName);                                                                                                                                                                          
-        lstrcatW(pattern, L"\\*");     
+        // Scan for numeric sub-folders (e.g. onKill/1, onKill/2, ...)
+        wchar_t subPattern[MAX_PATH]{};
+        lstrcpynW(subPattern, exeDir, MAX_PATH);
+        lstrcatW(subPattern, L"sounds\\");
+        lstrcatW(subPattern, fd.cFileName);
+        lstrcatW(subPattern, L"\\*");
 
         WIN32_FIND_DATAW fd2{};
-        HANDLE hFind2 = FindFirstFileW(pattern, &fd2);
+        HANDLE hFind2 = FindFirstFileW(subPattern, &fd2);
         if (hFind2 == INVALID_HANDLE_VALUE) continue;
 
         do {
-            if (fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;                                                                                                                                        
-            if (ev.count >= kMaxSoundsPerEvent) break;
+            if (!(fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (fd2.cFileName[0] == L'.') continue;
 
-            wchar_t filePath[MAX_PATH]{};                                                                                                                                                                         
-            lstrcpynW(filePath, exeDir, MAX_PATH);                                                                                                                                                                
-            lstrcatW(filePath, L"sounds\\");                                                                                                                                                                      
-            lstrcatW(filePath, fd.cFileName);                                                                                                                                                                     
-            lstrcatW(filePath, L"\\");                                                                                                                                                                            
-            lstrcatW(filePath, fd2.cFileName);                                                                                                                                                                    
-                                                                                                                                                                                                                  
-            if (DecodeToPCM(filePath, ev.clips[ev.count].pcm, ev.clips[ev.count].pcmLen)) {                                                                                                                       
-                char nameA[MAX_PATH]{};                                                                                                                                                                           
-                WideCharToMultiByte(CP_UTF8, 0, fd2.cFileName, -1, nameA, sizeof(nameA), nullptr, nullptr);                                                                                                       
-                std::printf("[sounds]   %s/%s (%lu bytes)\n", ev.name, nameA, ev.clips[ev.count].pcmLen);                                                                                                         
-                ++ev.count;
+            bool numeric = fd2.cFileName[0] != L'\0';
+            for (int i = 0; fd2.cFileName[i]; ++i) {
+                if (fd2.cFileName[i] < L'0' || fd2.cFileName[i] > L'9') { numeric = false; break; }
             }
+            if (!numeric) continue;
 
+            wchar_t relPath[MAX_PATH]{};
+            lstrcpynW(relPath, fd.cFileName, MAX_PATH);
+            lstrcatW(relPath, L"\\");
+            lstrcatW(relPath, fd2.cFileName);
+
+            char numStr[32]{};
+            WideCharToMultiByte(CP_UTF8, 0, fd2.cFileName, -1, numStr, sizeof(numStr), nullptr, nullptr);
+            char subEventName[64]{};
+            _snprintf_s(subEventName, _TRUNCATE, "%s/%s", eventName, numStr);
+
+            LoadEventFromFolder(exeDir, relPath, subEventName);
         } while (FindNextFileW(hFind2, &fd2));
         FindClose(hFind2);
-
-        if (ev.count > 0) {                                                                                                                                                                                       
-            ev.Shuffle();                                                                                                                                                                                         
-            std::printf("[sounds] %s: %d sounds\n", ev.name, ev.count);                                                                                                                                           
-            ++gEventCount;                                                                                                                                                                                        
-        }
     } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
 
@@ -298,6 +344,7 @@ int wmain() {
     std::printf("[sounds] client.dll @ %llX\n", gClient);
 
     int prevKillCount = -1, prevTotalRounds = -1;
+    int roundKills = 0;
     bool prevAlive = false, prevFreeze = false;
 
     std::printf("[sounds] listening...\n");
@@ -333,9 +380,13 @@ int wmain() {
             prevKillCount = kills;
         prevAlive = alive;
 
-        // Kill detection -- only advance baseline if played                                                                                                                                                                                                                                                                                                                                                                
-        if (alive && prevKillCount >= 0 && kills > prevKillCount)                                                                                                                                                                                                                                                                                                                                                           
-            PlayEvent("onKill");
+        // Kill detection -- only advance baseline if played
+        if (alive && prevKillCount >= 0 && kills > prevKillCount) {
+            roundKills += (kills - prevKillCount);
+            char subEvent[80];
+            _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
+            if (!PlayEvent(subEvent)) PlayEvent("onKill");
+        }
         prevKillCount = kills;
 
         if (!rules) continue;
@@ -345,10 +396,12 @@ int wmain() {
         if (freeze && !prevFreeze) {
             PlayEvent("onRoundFreeze", true);
             prevKillCount = kills;
+            roundKills = 0;
         }
         else if (prevFreeze && !freeze) {
             PlayEvent("onRoundStart", true);
             prevKillCount = kills;
+            roundKills = 0;
         }
         prevFreeze = freeze;
 
@@ -359,6 +412,7 @@ int wmain() {
             if (win == team) PlayEvent("onRoundWin", true);
             else if (win > 0 && win != team) PlayEvent("onRoundLose", true);
             prevKillCount = kills;
+            roundKills = 0;
         }
         prevTotalRounds = rounds;
     }

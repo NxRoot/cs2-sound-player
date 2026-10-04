@@ -372,8 +372,10 @@ int wmain() {
         int32_t kills = RPM<int32_t>(ctrl + gOff.killCount);
 
         // Death: alive → dead
-        if (prevAlive && !alive)
+        if (prevAlive && !alive) {
             PlayEvent("onDeath");
+            roundKills = 0;
+        }
 
         // Respawn/bot takeover: dead → alive, reset score baseline
         if (!prevAlive && alive)

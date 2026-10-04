@@ -475,12 +475,20 @@ void ProcessGSI(const char* json) {
     static char prevPhase[32] = "";
     static int roundKills = 0;
 
-    const char* player = JsonGet(json, "player");
-    const char* state  = JsonGet(player, "state");
-    const char* round  = JsonGet(json, "round");
-    const char* map    = JsonGet(json, "map");
-    const char* teamCt = JsonGet(map, "team_ct");
-    const char* teamT  = JsonGet(map, "team_t");
+    const char* provider = JsonGet(json, "provider");
+    const char* player   = JsonGet(json, "player");
+    const char* state    = JsonGet(player, "state");
+    const char* round    = JsonGet(json, "round");
+    const char* map      = JsonGet(json, "map");
+    const char* teamCt   = JsonGet(map, "team_ct");
+    const char* teamT    = JsonGet(map, "team_t");
+
+    // `provider.steamid` is the logged-in user; `player.steamid` is whoever the
+    // local client is currently rendering (self when alive, spectated target
+    // when dead). Only react to kill/death for our own id.
+    char selfId[32] = "";    JsonStr(JsonGet(provider, "steamid"), selfId, sizeof(selfId));
+    char watchedId[32] = ""; JsonStr(JsonGet(player,   "steamid"), watchedId, sizeof(watchedId));
+    bool isSelf = selfId[0] && std::strcmp(selfId, watchedId) == 0;
 
     int health  = JsonInt(JsonGet(state,  "health"),      -1);
     int kills   = JsonInt(JsonGet(state,  "round_kills"), -1);
@@ -490,19 +498,29 @@ void ProcessGSI(const char* json) {
     char phase[32] = ""; JsonStr(JsonGet(round,  "phase"), phase, sizeof(phase));
     char team[8]   = ""; JsonStr(JsonGet(player, "team"),  team,  sizeof(team));
 
-    // Death: health went from >0 to 0
-    if (prevHealth > 0 && health == 0) {
-        PlayEvent("onDeath");
-        roundKills = 0;
-    }
+    if (!isSelf) {
+        // Spectating -- drop stale per-player baselines so we don't fire on
+        // the next switch back to our own pawn.
+        prevKills = -1;
+        prevHealth = -1;
+    } else {
+        // Death: health went from >0 to 0
+        if (prevHealth > 0 && health == 0) {
+            PlayEvent("onDeath");
+            roundKills = 0;
+        }
 
-    // Kill: round_kills increased
-    if (prevKills >= 0 && kills > prevKills) {
-        roundKills += (kills - prevKills);
-        char subEvent[80];
-        _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
-        if (HasEvent(subEvent)) PlayEvent(subEvent, true);
-        else PlayEvent("onKill");
+        // Kill: round_kills increased
+        if (prevKills >= 0 && kills > prevKills) {
+            roundKills += (kills - prevKills);
+            char subEvent[80];
+            _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
+            if (HasEvent(subEvent)) PlayEvent(subEvent, true);
+            else PlayEvent("onKill");
+        }
+
+        prevKills  = kills;
+        prevHealth = health;
     }
 
     // Round phase transitions
@@ -527,8 +545,6 @@ void ProcessGSI(const char* json) {
         }
     }
 
-    prevKills   = kills;
-    prevHealth  = health;
     prevCtScore = ctScore;
     prevTScore  = tScore;
     lstrcpynA(prevPhase, phase, sizeof(prevPhase));
@@ -627,7 +643,7 @@ void EnsureGsiConfig() {
         "    \"timeout\"   \"5.0\"\n"
         "    \"buffer\"    \"0.1\"\n"
         "    \"throttle\"  \"0.1\"\n"
-        "    \"heartbeat\" \"30.0\"\n"
+        "    \"heartbeat\" \"1.0\"\n"
         "    \"data\"\n"
         "    {\n"
         "        \"provider\"           \"1\"\n"

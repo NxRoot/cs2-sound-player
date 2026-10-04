@@ -8,6 +8,7 @@ Listen to CS2 events and key presses to play audio files in game automatically
 - 💫 Automatic - Waits for game to open.
 - 💯 Undetectable - External tool, no injection.
 - 🧬 Self-Healing - No rebuild after game update.
+- 🎵 Multiple Audios - Play random sound from folder.
 
 # How to Install
 
@@ -30,6 +31,28 @@ Events are defined by folders inside `sounds`, each folder should contain the au
 
 # Custom Events
 You can create key press events by creating a folder inside `sounds` with the letter you want to trigger.
+
+# Kill Streak Events
+You can create kill streak events by creating numeric folders inside `onKill` folder:
+```ini
+sounds
+  └── onKill                          # Event Folder
+      ├── 1                           # First Kill (Folder)
+          └── first_kill.mp3          # First Kill (Sound)
+      ├── 2                           # Second Kill (Folder)
+          └── second_kill.mp3         # Second Kill (Sound)
+      ├── 3                           # Third Kill (Folder)
+          ├── third_kill_A.mp3        # Third Kill (Sound A)
+          └── third_kill_B.mp3        # Third Kill (Sound B)
+      ├── other_A.mp3
+      ├── other_B.mp3
+      └── other_C.mp3
+```
+If you kill &nbsp;  `1 enemy` &nbsp;  play random sound from folder &nbsp;`1`.
+
+If you kill &nbsp;  `2 enemies` &nbsp;  play random sound from folder &nbsp;`2`.
+
+If there's no more numeric folders, play random sound from `onKill` folder.
 
 # Output to Microphone
 

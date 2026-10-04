@@ -6,6 +6,9 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <new>
 #include <cstdio>
 #include <cstring>
@@ -86,6 +89,63 @@ EventSounds gEvents[kMaxEvents];
 int gEventCount = 0;
 HWAVEOUT gWaveOut = nullptr;
 WAVEHDR gHdr{};
+WAVEFORMATEX gFmt{};  // populated by QueryDeviceFormat; used for decode + playback
+
+// Query the preferred render device's mix format via WASAPI so we can decode and
+// play at the device's native sample rate (avoids the OS resampling our audio).
+// Keeps PCM 16-bit for waveOut compatibility.
+bool QueryDeviceFormat(const wchar_t* nameHint, WAVEFORMATEX& out) {
+    bool ok = false;
+    HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* en = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), (void**)&en)) && en) {
+        IMMDevice* target = nullptr;
+        IMMDeviceCollection* col = nullptr;
+        if (nameHint && SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &col)) && col) {
+            UINT n = 0; col->GetCount(&n);
+            for (UINT i = 0; i < n && !target; ++i) {
+                IMMDevice* d = nullptr; col->Item(i, &d);
+                if (!d) continue;
+                IPropertyStore* ps = nullptr;
+                if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &ps)) && ps) {
+                    PROPVARIANT pv; PropVariantInit(&pv);
+                    if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &pv))
+                        && pv.vt == VT_LPWSTR && wcsstr(pv.pwszVal, nameHint)) {
+                        target = d; d = nullptr;
+                    }
+                    PropVariantClear(&pv);
+                    ps->Release();
+                }
+                if (d) d->Release();
+            }
+            col->Release();
+        }
+        if (!target) en->GetDefaultAudioEndpoint(eRender, eConsole, &target);
+        if (target) {
+            IAudioClient* ac = nullptr;
+            if (SUCCEEDED(target->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&ac)) && ac) {
+                WAVEFORMATEX* mix = nullptr;
+                if (SUCCEEDED(ac->GetMixFormat(&mix)) && mix) {
+                    out.wFormatTag = WAVE_FORMAT_PCM;
+                    out.nChannels = mix->nChannels;
+                    out.nSamplesPerSec = mix->nSamplesPerSec;
+                    out.wBitsPerSample = 16;
+                    out.nBlockAlign = (WORD)(out.nChannels * out.wBitsPerSample / 8);
+                    out.nAvgBytesPerSec = out.nSamplesPerSec * out.nBlockAlign;
+                    out.cbSize = 0;
+                    CoTaskMemFree(mix);
+                    ok = true;
+                }
+                ac->Release();
+            }
+            target->Release();
+        }
+        en->Release();
+    }
+    if (SUCCEEDED(coHr)) CoUninitialize();
+    return ok;
+}
 
 bool DecodeToPCM(const wchar_t* path, BYTE*& outBuf, DWORD& outLen) {
     outBuf = nullptr; outLen = 0;
@@ -96,11 +156,11 @@ bool DecodeToPCM(const wchar_t* path, BYTE*& outBuf, DWORD& outLen) {
     MFCreateMediaType(&t);
     t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     t->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    t->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-    t->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    t->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    t->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
-    t->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 44100 * 4);
+    t->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, gFmt.nChannels);
+    t->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, gFmt.nSamplesPerSec);
+    t->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, gFmt.wBitsPerSample);
+    t->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, gFmt.nBlockAlign);
+    t->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, gFmt.nAvgBytesPerSec);
     reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, t);
     t->Release();
 
@@ -305,19 +365,25 @@ int wmain() {
     std::srand((unsigned)std::time(nullptr));
     std::printf("[sounds] starting...\n");
 
-    // Load + decode sounds
+    // Match the output device's native sample rate so nothing gets resampled.
+    if (!QueryDeviceFormat(L"CABLE Input", gFmt)) {
+        std::printf("[sounds] device mix format query failed; falling back to 48kHz stereo 16-bit\n");
+        gFmt.wFormatTag = WAVE_FORMAT_PCM;
+        gFmt.nChannels = 2;
+        gFmt.nSamplesPerSec = 48000;
+        gFmt.wBitsPerSample = 16;
+        gFmt.nBlockAlign = 4;
+        gFmt.nAvgBytesPerSec = 48000 * 4;
+    }
+    std::printf("[sounds] format: %u Hz, %u ch, %u-bit\n",
+        gFmt.nSamplesPerSec, gFmt.nChannels, gFmt.wBitsPerSample);
+
+    // Load + decode sounds (uses gFmt)
     if (!LoadSoundsFolder()) return 1;
 
-    // Open audio device
+    // Open audio device at the same format
     UINT devId = FindDevice();
-    WAVEFORMATEX wfx{};
-    wfx.wFormatTag = WAVE_FORMAT_PCM;
-    wfx.nChannels = 2;
-    wfx.nSamplesPerSec = 44100;
-    wfx.wBitsPerSample = 16;
-    wfx.nBlockAlign = 4;
-    wfx.nAvgBytesPerSec = 44100 * 4;
-    if (waveOutOpen(&gWaveOut, devId, &wfx, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+    if (waveOutOpen(&gWaveOut, devId, &gFmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
         std::printf("[sounds] failed to open audio device\n");
         return 1;
     }

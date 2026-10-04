@@ -129,6 +129,12 @@ bool DecodeToPCM(const wchar_t* path, BYTE*& outBuf, DWORD& outLen) {
     return outLen > 0;
 }
 
+bool HasEvent(const char* event) {
+    for (int i = 0; i < gEventCount; ++i)
+        if (std::strcmp(gEvents[i].name, event) == 0) return true;
+    return false;
+}
+
 bool PlayEvent(const char* event, bool force = false) {
     if (!gWaveOut) return false;
     if (!force && gHdr.lpData && !(gHdr.dwFlags & WHDR_DONE)) return false;
@@ -387,7 +393,8 @@ int wmain() {
             roundKills += (kills - prevKillCount);
             char subEvent[80];
             _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
-            if (!PlayEvent(subEvent)) PlayEvent("onKill");
+            if (HasEvent(subEvent)) PlayEvent(subEvent, true);
+            else PlayEvent("onKill");
         }
         prevKillCount = kills;
 

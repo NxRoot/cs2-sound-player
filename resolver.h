@@ -12,12 +12,13 @@
 struct SoundOffsets {
     uint32_t dwLocalPlayerController;
     uint32_t dwGameRules;
-    uint32_t teamNum;              // C_BaseEntity::m_iTeamNum
-    uint32_t pawnIsAlive;          // CCSPlayerController::m_bPawnIsAlive
-    uint32_t killCount;            // CCSPlayerController::m_nKillCount
-    uint32_t totalRoundsPlayed;    // C_CSGameRules::m_totalRoundsPlayed
-    uint32_t roundWinStatus;       // C_CSGameRules::m_iRoundWinStatus
-    uint32_t freezePeriod;         // C_CSGameRules::m_bFreezePeriod
+    uint32_t teamNum;                      // C_BaseEntity::m_iTeamNum
+    uint32_t pawnIsAlive;                  // CCSPlayerController::m_bPawnIsAlive
+    uint32_t pActionTrackingServices;      // CCSPlayerController::m_pActionTrackingServices
+    uint32_t numRoundKills;                // CCSPlayerController_ActionTrackingServices::m_iNumRoundKills
+    uint32_t totalRoundsPlayed;            // C_CSGameRules::m_totalRoundsPlayed
+    uint32_t roundWinStatus;               // C_CSGameRules::m_iRoundWinStatus
+    uint32_t freezePeriod;                 // C_CSGameRules::m_bFreezePeriod
 };
 
 namespace resolver {
@@ -226,12 +227,13 @@ inline bool Resolve(HANDLE handle, SoundOffsets& out, std::string& err) {
 
     // Schema fields
     static const WantedField kWanted[] = {
-        {"C_BaseEntity",        "m_iTeamNum",          &SoundOffsets::teamNum},
-        {"CCSPlayerController", "m_bPawnIsAlive",      &SoundOffsets::pawnIsAlive},
-        {"CCSPlayerController", "m_nKillCount",        &SoundOffsets::killCount},
-        {"C_CSGameRules",       "m_totalRoundsPlayed", &SoundOffsets::totalRoundsPlayed},
-        {"C_CSGameRules",       "m_iRoundWinStatus",   &SoundOffsets::roundWinStatus},
-        {"C_CSGameRules",       "m_bFreezePeriod",     &SoundOffsets::freezePeriod},
+        {"C_BaseEntity",                              "m_iTeamNum",                 &SoundOffsets::teamNum},
+        {"CCSPlayerController",                       "m_bPawnIsAlive",             &SoundOffsets::pawnIsAlive},
+        {"CCSPlayerController",                       "m_pActionTrackingServices",  &SoundOffsets::pActionTrackingServices},
+        {"CCSPlayerController_ActionTrackingServices","m_iNumRoundKills",           &SoundOffsets::numRoundKills},
+        {"C_CSGameRules",                             "m_totalRoundsPlayed",        &SoundOffsets::totalRoundsPlayed},
+        {"C_CSGameRules",                             "m_iRoundWinStatus",          &SoundOffsets::roundWinStatus},
+        {"C_CSGameRules",                             "m_bFreezePeriod",            &SoundOffsets::freezePeriod},
     };
 
     int32_t scopeCount = p.Read<int32_t>(ss + schema::kSystemTypeScopes);

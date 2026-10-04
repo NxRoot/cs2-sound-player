@@ -375,7 +375,8 @@ int wmain() {
         uintptr_t rules = RPM<uintptr_t>(gClient + gOff.dwGameRules);
 
         bool alive = RPM<uint8_t>(ctrl + gOff.pawnIsAlive) != 0;
-        int32_t kills = RPM<int32_t>(ctrl + gOff.killCount);
+        uintptr_t ats = RPM<uintptr_t>(ctrl + gOff.pActionTrackingServices);
+        int32_t kills = ats ? RPM<int32_t>(ats + gOff.numRoundKills) : 0;
 
         // Death: alive → dead
         if (prevAlive && !alive) {

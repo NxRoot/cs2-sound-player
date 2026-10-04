@@ -218,34 +218,75 @@ bool PlayEvent(const char* event, bool force = false) {
 
 UINT PromptDevice(wchar_t* nameOut, size_t nameOutCch) {
     if (nameOut && nameOutCch) nameOut[0] = L'\0';
-    UINT n = waveOutGetNumDevs();
-    if (n == 0) {
+
+    // Enumerate via WASAPI for full (untruncated) friendly names, then map each
+    // back to a waveOut device ID via szPname prefix match -- waveOut's name is
+    // the first ~31 chars of the WASAPI friendly name.
+    struct Dev { wchar_t name[256]; UINT waveId; };
+    Dev devs[32]{};
+    int count = 0;
+
+    HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* en = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), (void**)&en)) && en) {
+        IMMDeviceCollection* col = nullptr;
+        if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &col)) && col) {
+            UINT n = 0; col->GetCount(&n);
+            UINT waveCount = waveOutGetNumDevs();
+            for (UINT i = 0; i < n && count < (int)_countof(devs); ++i) {
+                IMMDevice* d = nullptr; col->Item(i, &d);
+                if (!d) continue;
+                IPropertyStore* ps = nullptr;
+                if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &ps)) && ps) {
+                    PROPVARIANT pv; PropVariantInit(&pv);
+                    if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR) {
+                        lstrcpynW(devs[count].name, pv.pwszVal, (int)_countof(devs[0].name));
+                        UINT matched = (UINT)-1;
+                        for (UINT w = 0; w < waveCount; ++w) {
+                            WAVEOUTCAPSW caps{};
+                            if (waveOutGetDevCapsW(w, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+                            size_t L = wcslen(caps.szPname);
+                            if (L && wcsncmp(caps.szPname, devs[count].name, L) == 0) { matched = w; break; }
+                        }
+                        if (matched != (UINT)-1) {
+                            devs[count].waveId = matched;
+                            ++count;
+                        }
+                    }
+                    PropVariantClear(&pv);
+                    ps->Release();
+                }
+                d->Release();
+            }
+            col->Release();
+        }
+        en->Release();
+    }
+    if (SUCCEEDED(coHr)) CoUninitialize();
+
+    if (count == 0) {
         std::printf("[sounds] no audio output devices found, using system default\n");
         return WAVE_MAPPER;
     }
+
     std::printf("\n[sounds] audio output devices:\n");
-    for (UINT i = 0; i < n; ++i) {
-        WAVEOUTCAPSW caps{};
-        if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-            wprintf(L"  %u: %s\n", i, caps.szPname);
-    }
-    wprintf(L"  %u: (system default)\n", n);
-    std::printf("select device [0-%u]: ", n);
+    for (int i = 0; i < count; ++i)
+        wprintf(L"  %d: %s\n", i, devs[i].name);
+    wprintf(L"  %d: (system default)\n", count);
+    std::printf("select device [0-%d]: ", count);
     std::fflush(stdout);
 
-    unsigned pick = n;
-    if (scanf_s("%u", &pick) != 1 || pick > n) pick = n;
+    unsigned pick = (unsigned)count;
+    if (scanf_s("%u", &pick) != 1 || pick > (unsigned)count) pick = (unsigned)count;
 
-    if (pick == n) {
+    if ((int)pick == count) {
         std::printf("[sounds] using system default output\n");
         return WAVE_MAPPER;
     }
-    WAVEOUTCAPSW caps{};
-    if (waveOutGetDevCapsW(pick, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
-        if (nameOut && nameOutCch) lstrcpynW(nameOut, caps.szPname, (int)nameOutCch);
-        wprintf(L"[sounds] selected: %s\n", caps.szPname);
-    }
-    return pick;
+    if (nameOut && nameOutCch) lstrcpynW(nameOut, devs[pick].name, (int)nameOutCch);
+    wprintf(L"[sounds] selected: %s\n", devs[pick].name);
+    return devs[pick].waveId;
 }
 
 bool LoadEventFromFolder(const wchar_t* exeDir, const wchar_t* relFolder, const char* eventName) {
@@ -384,7 +425,7 @@ int wmain() {
     std::printf("[sounds] starting...\n");
 
     // Prompt first so a mistake doesn't waste the decode pass.
-    wchar_t devName[MAXPNAMELEN]{};
+    wchar_t devName[256]{};
     UINT devId = PromptDevice(devName, _countof(devName));
 
     // Match the chosen device's native sample rate so nothing gets resampled.

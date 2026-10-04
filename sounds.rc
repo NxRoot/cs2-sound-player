@@ -1,0 +1,3 @@
+// Resources linked into loader.exe. Icon id 1: Explorer shows the lowest-
+// numbered icon resource as the application icon.
+1 ICON "icon.ico"

@@ -216,18 +216,36 @@ bool PlayEvent(const char* event, bool force = false) {
     return false;
 }
 
-UINT FindDevice() {
+UINT PromptDevice(wchar_t* nameOut, size_t nameOutCch) {
+    if (nameOut && nameOutCch) nameOut[0] = L'\0';
     UINT n = waveOutGetNumDevs();
+    if (n == 0) {
+        std::printf("[sounds] no audio output devices found, using system default\n");
+        return WAVE_MAPPER;
+    }
+    std::printf("\n[sounds] audio output devices:\n");
     for (UINT i = 0; i < n; ++i) {
         WAVEOUTCAPSW caps{};
         if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-            if (wcsstr(caps.szPname, L"CABLE Input")) {
-                wprintf(L"[sounds] output: %s\n", caps.szPname);
-                return i;
-            }
+            wprintf(L"  %u: %s\n", i, caps.szPname);
     }
-    std::printf("[sounds] CABLE Input not found, using default\n");
-    return WAVE_MAPPER;
+    wprintf(L"  %u: (system default)\n", n);
+    std::printf("select device [0-%u]: ", n);
+    std::fflush(stdout);
+
+    unsigned pick = n;
+    if (scanf_s("%u", &pick) != 1 || pick > n) pick = n;
+
+    if (pick == n) {
+        std::printf("[sounds] using system default output\n");
+        return WAVE_MAPPER;
+    }
+    WAVEOUTCAPSW caps{};
+    if (waveOutGetDevCapsW(pick, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+        if (nameOut && nameOutCch) lstrcpynW(nameOut, caps.szPname, (int)nameOutCch);
+        wprintf(L"[sounds] selected: %s\n", caps.szPname);
+    }
+    return pick;
 }
 
 bool LoadEventFromFolder(const wchar_t* exeDir, const wchar_t* relFolder, const char* eventName) {
@@ -365,8 +383,12 @@ int wmain() {
     std::srand((unsigned)std::time(nullptr));
     std::printf("[sounds] starting...\n");
 
-    // Match the output device's native sample rate so nothing gets resampled.
-    if (!QueryDeviceFormat(L"CABLE Input", gFmt)) {
+    // Prompt first so a mistake doesn't waste the decode pass.
+    wchar_t devName[MAXPNAMELEN]{};
+    UINT devId = PromptDevice(devName, _countof(devName));
+
+    // Match the chosen device's native sample rate so nothing gets resampled.
+    if (!QueryDeviceFormat(devName[0] ? devName : nullptr, gFmt)) {
         std::printf("[sounds] device mix format query failed; falling back to 48kHz stereo 16-bit\n");
         gFmt.wFormatTag = WAVE_FORMAT_PCM;
         gFmt.nChannels = 2;
@@ -375,14 +397,13 @@ int wmain() {
         gFmt.nBlockAlign = 4;
         gFmt.nAvgBytesPerSec = 48000 * 4;
     }
-    std::printf("[sounds] format: %u Hz, %u ch, %u-bit\n",
+    std::printf("[sounds] format: %lu Hz, %u ch, %u-bit\n",
         gFmt.nSamplesPerSec, gFmt.nChannels, gFmt.wBitsPerSample);
 
     // Load + decode sounds (uses gFmt)
     if (!LoadSoundsFolder()) return 1;
 
-    // Open audio device at the same format
-    UINT devId = FindDevice();
+    // Open the chosen device at the same format
     if (waveOutOpen(&gWaveOut, devId, &gFmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
         std::printf("[sounds] failed to open audio device\n");
         return 1;

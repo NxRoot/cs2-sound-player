@@ -474,6 +474,7 @@ void ProcessGSI(const char* json) {
     static int prevKills = -1, prevHealth = -1, prevCtScore = -1, prevTScore = -1;
     static int prevFlashed = -1, prevBurning = -1;
     static char prevPhase[32] = "";
+    static char selfTeam[8] = "";  // our actual team, cached from last isSelf frame
     static int roundKills = 0;
 
     const char* provider = JsonGet(json, "provider");
@@ -536,6 +537,7 @@ void ProcessGSI(const char* json) {
         prevHealth  = health;
         prevFlashed = flashed;
         prevBurning = burning;
+        if (team[0]) lstrcpynA(selfTeam, team, sizeof(selfTeam));
     }
 
     // Round phase transitions
@@ -549,12 +551,14 @@ void ProcessGSI(const char* json) {
         }
     }
 
-    // Round win/lose: team score changed (compared to previous payload)
-    if (prevCtScore >= 0 && prevTScore >= 0 && team[0]) {
+    // Round win/lose: team score changed. Use our cached own-team, not
+    // `player.team` -- when dead we're spectating and that reads the target's
+    // team, which can be the OTHER side.
+    if (prevCtScore >= 0 && prevTScore >= 0 && selfTeam[0]) {
         bool ctWon = ctScore > prevCtScore;
         bool tWon  = tScore  > prevTScore;
         if (ctWon || tWon) {
-            bool meWon = (ctWon && team[0] == 'C') || (tWon && team[0] == 'T');
+            bool meWon = (ctWon && selfTeam[0] == 'C') || (tWon && selfTeam[0] == 'T');
             PlayEvent(meWon ? "onRoundWin" : "onRoundLose", true);
             roundKills = 0;
         }
@@ -658,7 +662,7 @@ void EnsureGsiConfig() {
         "    \"timeout\"   \"5.0\"\n"
         "    \"buffer\"    \"0.1\"\n"
         "    \"throttle\"  \"0.1\"\n"
-        "    \"heartbeat\" \"1.0\"\n"
+        "    \"heartbeat\" \"0.1\"\n"
         "    \"data\"\n"
         "    {\n"
         "        \"provider\"           \"1\"\n"

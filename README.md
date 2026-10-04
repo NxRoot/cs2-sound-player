@@ -2,7 +2,7 @@
 
 Listen to CS2 events and key presses to play audio files in game automatically
 
-<img src="https://github.com/NxRoot/cs2-sound-player/blob/main/preview/banner.png" width="75%" alt="Alt text" title="icon">
+<img src="https://github.com/NxRoot/cs2-sound-player/blob/main/preview/banner.png" width="90%" alt="Alt text" title="icon">
 
 # Features
 - 💫 Automatic - Waits for game to open.
@@ -63,7 +63,7 @@ If there's no more numeric folders, play random sound from `onKill` folder.
 # In Game Settings
 * Set voice mode to `Open Microphone`, not push to talk.
 * Set threshold above noise, around `-90`. (Optional)
-<img src="https://github.com/NxRoot/cs2-sound-player/blob/main/preview/settings.png" width="70%" alt="Alt text" title="icon">
+<img src="https://github.com/NxRoot/cs2-sound-player/blob/main/preview/settings.png" width="80%" alt="Alt text" title="icon">
 
 
 ## &nbsp;

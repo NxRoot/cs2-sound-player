@@ -56,8 +56,14 @@ If there's no more numeric folders, play random sound from `onKill` folder.
 
 # Output to Microphone
 
-* To **emulate a microphone device** you need to install a virtual audio driver like [VB-CABLE](https://vb-audio.com/Cable/).
-* Then you can select the microphone (Cable Input) inside the game.
+* To **emulate a microphone device** you need to install a virtual audio driver like [VB-CABLE](https://vb-audio.com/Cable/)
+* Then you can select the microphone (Cable Output) inside the game.
+
+
+# In Game Settings
+* Set voice mode to `Open Microphone`, not push to talk.
+* Set threshold above noise, around `-90`. (Optional)
+<img src="https://i.ibb.co/yF0c1LF7/mics.png" width="65%" alt="Alt text" title="icon">
 
 
 ## &nbsp;

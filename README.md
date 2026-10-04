@@ -26,6 +26,8 @@ Events are defined by folders inside `sounds`, each folder should contain the au
 |<a href="#">onRoundStart</a>| Triggered when round starts and player unfreezes| True |
 |<a href="#">onRoundLose</a>| Triggered when player team loses the round| True |
 |<a href="#">onRoundWin</a>| Triggered when player team wins the round| True |
+|<a href="#">onBurning</a>| Triggered when player is burning| True |
+|<a href="#">onFlashed</a>| Triggered when player is flashed| True |
 |<a href="#">C</a>| Triggered when player presses C on keyboard| True |
 
 # Custom Events

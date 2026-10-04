@@ -472,6 +472,7 @@ bool JsonStr(const char* v, char* out, size_t cap) {
 
 void ProcessGSI(const char* json) {
     static int prevKills = -1, prevHealth = -1, prevCtScore = -1, prevTScore = -1;
+    static int prevFlashed = -1, prevBurning = -1;
     static char prevPhase[32] = "";
     static int roundKills = 0;
 
@@ -492,6 +493,8 @@ void ProcessGSI(const char* json) {
 
     int health  = JsonInt(JsonGet(state,  "health"),      -1);
     int kills   = JsonInt(JsonGet(state,  "round_kills"), -1);
+    int flashed = JsonInt(JsonGet(state,  "flashed"),     -1);
+    int burning = JsonInt(JsonGet(state,  "burning"),     -1);
     int ctScore = JsonInt(JsonGet(teamCt, "score"),       -1);
     int tScore  = JsonInt(JsonGet(teamT,  "score"),       -1);
 
@@ -503,6 +506,8 @@ void ProcessGSI(const char* json) {
         // the next switch back to our own pawn.
         prevKills = -1;
         prevHealth = -1;
+        prevFlashed = -1;
+        prevBurning = -1;
     } else {
         // Death: health went from >0 to 0
         if (prevHealth > 0 && health == 0) {
@@ -519,8 +524,18 @@ void ProcessGSI(const char* json) {
             else PlayEvent("onKill");
         }
 
-        prevKills  = kills;
-        prevHealth = health;
+        // Flashed: intensity went from 0 to >0
+        if (prevFlashed == 0 && flashed > 0)
+            PlayEvent("onFlashed");
+
+        // Burning: intensity went from 0 to >0
+        if (prevBurning == 0 && burning > 0)
+            PlayEvent("onBurning");
+
+        prevKills   = kills;
+        prevHealth  = health;
+        prevFlashed = flashed;
+        prevBurning = burning;
     }
 
     // Round phase transitions

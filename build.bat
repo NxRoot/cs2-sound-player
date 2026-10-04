@@ -37,7 +37,7 @@ if not defined RC (
 "%CLANG%" -std=c++20 -O2 -DNDEBUG -DUNICODE -D_UNICODE -municode -fms-extensions ^
     "sounds.cpp" %RES% ^
     -o "%OUT%" ^
-    -luser32 -lkernel32 -lwinmm -lole32 -lmfplat -lmfreadwrite -lmfuuid -lpsapi
+    -luser32 -lkernel32 -ladvapi32 -lwinmm -lole32 -lmfplat -lmfreadwrite -lmfuuid -lws2_32
 
 if %ERRORLEVEL% neq 0 (
     echo.

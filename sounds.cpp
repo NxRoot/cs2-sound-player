@@ -1,7 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <tlhelp32.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <mmsystem.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -14,40 +15,16 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
-#include "resolver.h"
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 namespace {
-
-// ── Process ──
-
-HANDLE gProcess{};
-uintptr_t gClient{};
-SoundOffsets gOff{};
-
-template <class T>
-T RPM(uintptr_t addr) {
-    T val{};
-    ReadProcessMemory(gProcess, reinterpret_cast<void*>(addr), &val, sizeof(T), nullptr);
-    return val;
-}
-
-DWORD FindProcess(const wchar_t* name) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
-    DWORD pid = 0;
-    if (Process32FirstW(snap, &pe))
-        do { if (_wcsicmp(pe.szExeFile, name) == 0) { pid = pe.th32ProcessID; break; } }
-        while (Process32NextW(snap, &pe));
-    CloseHandle(snap);
-    return pid;
-}
 
 // ── Audio ──
 
@@ -90,6 +67,7 @@ int gEventCount = 0;
 HWAVEOUT gWaveOut = nullptr;
 WAVEHDR gHdr{};
 WAVEFORMATEX gFmt{};  // populated by QueryDeviceFormat; used for decode + playback
+CRITICAL_SECTION gPlayLock;  // guards PlayEvent -- GSI thread + key-poll thread both call it
 
 // Query the preferred render device's mix format via WASAPI so we can decode and
 // play at the device's native sample rate (avoids the OS resampling our audio).
@@ -197,23 +175,28 @@ bool HasEvent(const char* event) {
 
 bool PlayEvent(const char* event, bool force = false) {
     if (!gWaveOut) return false;
-    if (!force && gHdr.lpData && !(gHdr.dwFlags & WHDR_DONE)) return false;
-    if (force) waveOutReset(gWaveOut);
-    for (int i = 0; i < gEventCount; ++i) {
-        if (std::strcmp(gEvents[i].name, event) != 0) continue;
-        int idx = gEvents[i].Next();
-        if (idx < 0 || !gEvents[i].clips[idx].pcm) return false;
-        if (gHdr.dwFlags & WHDR_PREPARED)
-            waveOutUnprepareHeader(gWaveOut, &gHdr, sizeof(gHdr));
-        std::memset(&gHdr, 0, sizeof(gHdr));
-        gHdr.lpData = reinterpret_cast<LPSTR>(gEvents[i].clips[idx].pcm);
-        gHdr.dwBufferLength = gEvents[i].clips[idx].pcmLen;
-        waveOutPrepareHeader(gWaveOut, &gHdr, sizeof(gHdr));
-        waveOutWrite(gWaveOut, &gHdr, sizeof(gHdr));
-        std::printf("[sounds] %s #%d\n", event, idx + 1);
-        return true;
+    EnterCriticalSection(&gPlayLock);
+    bool played = false;
+    if (force || !gHdr.lpData || (gHdr.dwFlags & WHDR_DONE)) {
+        if (force) waveOutReset(gWaveOut);
+        for (int i = 0; i < gEventCount; ++i) {
+            if (std::strcmp(gEvents[i].name, event) != 0) continue;
+            int idx = gEvents[i].Next();
+            if (idx < 0 || !gEvents[i].clips[idx].pcm) break;
+            if (gHdr.dwFlags & WHDR_PREPARED)
+                waveOutUnprepareHeader(gWaveOut, &gHdr, sizeof(gHdr));
+            std::memset(&gHdr, 0, sizeof(gHdr));
+            gHdr.lpData = reinterpret_cast<LPSTR>(gEvents[i].clips[idx].pcm);
+            gHdr.dwBufferLength = gEvents[i].clips[idx].pcmLen;
+            waveOutPrepareHeader(gWaveOut, &gHdr, sizeof(gHdr));
+            waveOutWrite(gWaveOut, &gHdr, sizeof(gHdr));
+            std::printf("[sounds] %s #%d\n", event, idx + 1);
+            played = true;
+            break;
+        }
     }
-    return false;
+    LeaveCriticalSection(&gPlayLock);
+    return played;
 }
 
 UINT PromptDevice(wchar_t* nameOut, size_t nameOutCch) {
@@ -418,6 +401,249 @@ bool LoadSoundsFolder() {
     return gEventCount > 0;
 }
 
+// ── Minimal JSON reader (object-scoped lookups; good enough for GSI payloads) ──
+
+const char* JsonSkip(const char* p) {
+    if (!p) return nullptr;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+    if (*p == '"') {
+        ++p;
+        while (*p && *p != '"') { if (*p == '\\' && p[1]) ++p; ++p; }
+        return *p == '"' ? p + 1 : nullptr;
+    }
+    if (*p == '{' || *p == '[') {
+        char close = (*p == '{') ? '}' : ']';
+        int d = 1; ++p;
+        bool inStr = false;
+        while (*p && d > 0) {
+            if (inStr) {
+                if (*p == '\\' && p[1]) p += 2;
+                else { if (*p == '"') inStr = false; ++p; }
+                continue;
+            }
+            if (*p == '"') inStr = true;
+            else if (*p == '{' || *p == '[') ++d;
+            else if (*p == '}' || *p == ']') --d;
+            ++p;
+        }
+        return d == 0 ? p : nullptr;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\n' && *p != '\r' && *p != '\t') ++p;
+    return p;
+}
+
+const char* JsonGet(const char* obj, const char* key) {
+    if (!obj) return nullptr;
+    while (*obj == ' ' || *obj == '\t' || *obj == '\n' || *obj == '\r') ++obj;
+    if (*obj != '{') return nullptr;
+    size_t klen = std::strlen(key);
+    const char* p = obj + 1;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') ++p;
+        if (*p == '}') return nullptr;
+        if (*p != '"') return nullptr;
+        const char* keyStart = p + 1;
+        const char* keyEnd = std::strchr(keyStart, '"');
+        if (!keyEnd) return nullptr;
+        bool match = (size_t)(keyEnd - keyStart) == klen && std::memcmp(keyStart, key, klen) == 0;
+        p = keyEnd + 1;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ':') ++p;
+        if (match) return p;
+        p = JsonSkip(p);
+        if (!p) return nullptr;
+    }
+    return nullptr;
+}
+
+int JsonInt(const char* v, int def) { return v ? std::atoi(v) : def; }
+
+bool JsonStr(const char* v, char* out, size_t cap) {
+    if (!v || *v != '"' || !out || cap == 0) { if (out && cap) out[0] = 0; return false; }
+    ++v;
+    size_t i = 0;
+    while (*v && *v != '"' && i < cap - 1) {
+        if (*v == '\\' && v[1]) { out[i++] = v[1]; v += 2; } else out[i++] = *v++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
+// ── GSI event processing ──
+
+void ProcessGSI(const char* json) {
+    static int prevKills = -1, prevHealth = -1, prevCtScore = -1, prevTScore = -1;
+    static char prevPhase[32] = "";
+    static int roundKills = 0;
+
+    const char* player = JsonGet(json, "player");
+    const char* state  = JsonGet(player, "state");
+    const char* round  = JsonGet(json, "round");
+    const char* map    = JsonGet(json, "map");
+    const char* teamCt = JsonGet(map, "team_ct");
+    const char* teamT  = JsonGet(map, "team_t");
+
+    int health  = JsonInt(JsonGet(state,  "health"),      -1);
+    int kills   = JsonInt(JsonGet(state,  "round_kills"), -1);
+    int ctScore = JsonInt(JsonGet(teamCt, "score"),       -1);
+    int tScore  = JsonInt(JsonGet(teamT,  "score"),       -1);
+
+    char phase[32] = ""; JsonStr(JsonGet(round,  "phase"), phase, sizeof(phase));
+    char team[8]   = ""; JsonStr(JsonGet(player, "team"),  team,  sizeof(team));
+
+    // Death: health went from >0 to 0
+    if (prevHealth > 0 && health == 0) {
+        PlayEvent("onDeath");
+        roundKills = 0;
+    }
+
+    // Kill: round_kills increased
+    if (prevKills >= 0 && kills > prevKills) {
+        roundKills += (kills - prevKills);
+        char subEvent[80];
+        _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
+        if (HasEvent(subEvent)) PlayEvent(subEvent, true);
+        else PlayEvent("onKill");
+    }
+
+    // Round phase transitions
+    if (prevPhase[0] && std::strcmp(prevPhase, phase) != 0) {
+        if (std::strcmp(phase, "freezetime") == 0) {
+            PlayEvent("onRoundFreeze", true);
+            roundKills = 0;
+        } else if (std::strcmp(phase, "live") == 0 && std::strcmp(prevPhase, "freezetime") == 0) {
+            PlayEvent("onRoundStart", true);
+            roundKills = 0;
+        }
+    }
+
+    // Round win/lose: team score changed (compared to previous payload)
+    if (prevCtScore >= 0 && prevTScore >= 0 && team[0]) {
+        bool ctWon = ctScore > prevCtScore;
+        bool tWon  = tScore  > prevTScore;
+        if (ctWon || tWon) {
+            bool meWon = (ctWon && team[0] == 'C') || (tWon && team[0] == 'T');
+            PlayEvent(meWon ? "onRoundWin" : "onRoundLose", true);
+            roundKills = 0;
+        }
+    }
+
+    prevKills   = kills;
+    prevHealth  = health;
+    prevCtScore = ctScore;
+    prevTScore  = tScore;
+    lstrcpynA(prevPhase, phase, sizeof(prevPhase));
+}
+
+// ── GSI HTTP server (127.0.0.1:3000) ──
+
+constexpr int kGsiPort = 3000;
+
+DWORD WINAPI GsiServerThread(LPVOID) {
+    WSADATA wsa{}; WSAStartup(MAKEWORD(2, 2), &wsa);
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == INVALID_SOCKET) return 1;
+    BOOL reuse = TRUE;
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(kGsiPort);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) != 0
+        || listen(listener, SOMAXCONN) != 0) {
+        std::printf("[gsi] bind/listen on 127.0.0.1:%d failed\n", kGsiPort);
+        closesocket(listener);
+        return 1;
+    }
+    std::printf("[gsi] listening on http://127.0.0.1:%d\n", kGsiPort);
+
+    static char buf[65536];
+    for (;;) {
+        SOCKET c = accept(listener, nullptr, nullptr);
+        if (c == INVALID_SOCKET) continue;
+
+        int total = 0, headersEnd = -1, contentLength = 0;
+        while (total < (int)sizeof(buf) - 1) {
+            int r = recv(c, buf + total, (int)sizeof(buf) - 1 - total, 0);
+            if (r <= 0) break;
+            total += r;
+            buf[total] = '\0';
+            if (headersEnd < 0) {
+                char* he = std::strstr(buf, "\r\n\r\n");
+                if (he) {
+                    headersEnd = (int)(he - buf) + 4;
+                    char* cl = std::strstr(buf, "Content-Length:");
+                    if (!cl) cl = std::strstr(buf, "content-length:");
+                    if (cl) contentLength = std::atoi(cl + 15);
+                }
+            }
+            if (headersEnd >= 0 && total >= headersEnd + contentLength) break;
+        }
+
+        const char* resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        send(c, resp, (int)std::strlen(resp), 0);
+        closesocket(c);
+
+        if (headersEnd >= 0 && contentLength > 0 && headersEnd + contentLength < (int)sizeof(buf)) {
+            buf[headersEnd + contentLength] = '\0';
+            ProcessGSI(buf + headersEnd);
+        }
+    }
+    // unreachable
+}
+
+// ── GSI config auto-install into CS2 cfg folder ──
+
+void EnsureGsiConfig() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        std::printf("[gsi] Steam not found in registry; install the GSI config manually (see README)\n");
+        return;
+    }
+    wchar_t steamPath[MAX_PATH]{}; DWORD cb = sizeof(steamPath); DWORD type = 0;
+    LONG r = RegQueryValueExW(key, L"SteamPath", nullptr, &type, (LPBYTE)steamPath, &cb);
+    RegCloseKey(key);
+    if (r != ERROR_SUCCESS) {
+        std::printf("[gsi] SteamPath value missing from registry\n");
+        return;
+    }
+    for (wchar_t* p = steamPath; *p; ++p) if (*p == L'/') *p = L'\\';
+
+    wchar_t cfgPath[MAX_PATH];
+    _snwprintf_s(cfgPath, _TRUNCATE,
+        L"%s\\steamapps\\common\\Counter-Strike Global Offensive\\game\\csgo\\cfg\\gamestate_integration_node.cfg",
+        steamPath);
+
+    HANDLE h = CreateFileW(cfgPath, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        if (e == ERROR_FILE_EXISTS) wprintf(L"[gsi] config already present: %s\n", cfgPath);
+        else wprintf(L"[gsi] could not write %s (err %lu) -- install it manually\n", cfgPath, e);
+        return;
+    }
+    const char* cfg =
+        "\"CS2 Sound Player\"\n"
+        "{\n"
+        "    \"uri\"       \"http://127.0.0.1:3000\"\n"
+        "    \"timeout\"   \"5.0\"\n"
+        "    \"buffer\"    \"0.1\"\n"
+        "    \"throttle\"  \"0.1\"\n"
+        "    \"heartbeat\" \"30.0\"\n"
+        "    \"data\"\n"
+        "    {\n"
+        "        \"provider\"           \"1\"\n"
+        "        \"map\"                \"1\"\n"
+        "        \"round\"              \"1\"\n"
+        "        \"player_id\"          \"1\"\n"
+        "        \"player_state\"       \"1\"\n"
+        "        \"player_match_stats\" \"1\"\n"
+        "    }\n"
+        "}\n";
+    DWORD w = 0;
+    WriteFile(h, cfg, (DWORD)std::strlen(cfg), &w, nullptr);
+    CloseHandle(h);
+    wprintf(L"[gsi] installed config: %s\n", cfgPath);
+}
+
 } // namespace
 
 int wmain() {
@@ -444,49 +670,28 @@ int wmain() {
     // Load + decode sounds (uses gFmt)
     if (!LoadSoundsFolder()) return 1;
 
+    InitializeCriticalSection(&gPlayLock);
+
     // Open the chosen device at the same format
     if (waveOutOpen(&gWaveOut, devId, &gFmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
         std::printf("[sounds] failed to open audio device\n");
         return 1;
     }
 
-    // Attach to cs2
-    DWORD pid = FindProcess(L"cs2.exe");
-    if (!pid) {
-        std::printf("[sounds] waiting for cs2.exe...\n");
-        while (!(pid = FindProcess(L"cs2.exe"))) Sleep(1000);
-    }
-    gProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!gProcess) { std::printf("[sounds] can't open cs2 -- run as admin\n"); return 1; }
-    std::printf("[sounds] cs2 pid %lu\n", pid);
+    // Install the Game State Integration config in CS2's cfg folder if missing.
+    EnsureGsiConfig();
 
-    // Resolve offsets
-    std::printf("[sounds] resolving offsets...\n");
-    std::string err;
-    for (int attempt = 0; attempt < 60; ++attempt) {
-        if (resolver::Resolve(gProcess, gOff, err)) break;
-        if (attempt < 59) { std::printf("[sounds] %s, retrying...\n", err.c_str()); Sleep(2000); }
-    }
-    if (!gOff.dwLocalPlayerController) {
-        std::printf("[sounds] resolve failed: %s\n", err.c_str());
+    // Spin up the HTTP server that receives CS2's state posts.
+    HANDLE srv = CreateThread(nullptr, 0, GsiServerThread, nullptr, 0, nullptr);
+    if (!srv) {
+        std::printf("[sounds] failed to start GSI server thread\n");
         return 1;
     }
-    gClient = 0;
-    { uintptr_t base = 0; uint32_t sz = 0;
-      resolver::FindModule(resolver::Process(gProcess), L"client.dll", base, sz);
-      gClient = base; }
-    std::printf("[sounds] client.dll @ %llX\n", gClient);
-
-    int prevKillCount = -1, prevTotalRounds = -1;
-    int roundKills = 0;
-    bool prevAlive = false, prevFreeze = false;
 
     std::printf("[sounds] listening...\n");
 
+    // Key-triggered events (single-letter folders).
     while (true) {
-        Sleep(50);
-
-        // Key-triggered events (single-letter folders)
         for (int i = 0; i < gEventCount; ++i) {
             if (!gEvents[i].vkey) continue;
             bool down = (GetAsyncKeyState(gEvents[i].vkey) & 0x8000) != 0;
@@ -494,64 +699,6 @@ int wmain() {
                 PlayEvent(gEvents[i].name, true);
             gEvents[i].keyDown = down;
         }
-
-        Sleep(150);
-
-        uintptr_t ctrl = RPM<uintptr_t>(gClient + gOff.dwLocalPlayerController);
-        if (!ctrl) continue;
-
-        uintptr_t rules = RPM<uintptr_t>(gClient + gOff.dwGameRules);
-
-        bool alive = RPM<uint8_t>(ctrl + gOff.pawnIsAlive) != 0;
-        uintptr_t ats = RPM<uintptr_t>(ctrl + gOff.pActionTrackingServices);
-        int32_t kills = ats ? RPM<int32_t>(ats + gOff.numRoundKills) : 0;
-
-        // Death: alive → dead
-        if (prevAlive && !alive) {
-            PlayEvent("onDeath");
-            roundKills = 0;
-        }
-
-        // Respawn/bot takeover: dead → alive, reset score baseline
-        if (!prevAlive && alive)
-            prevKillCount = kills;
-        prevAlive = alive;
-
-        // Kill detection -- only advance baseline if played
-        if (alive && prevKillCount >= 0 && kills > prevKillCount) {
-            roundKills += (kills - prevKillCount);
-            char subEvent[80];
-            _snprintf_s(subEvent, _TRUNCATE, "onKill/%d", roundKills);
-            if (HasEvent(subEvent)) PlayEvent(subEvent, true);
-            else PlayEvent("onKill");
-        }
-        prevKillCount = kills;
-
-        if (!rules) continue;
-
-        // Round events force-stop any playing kill/death sound
-        bool freeze = RPM<uint8_t>(rules + gOff.freezePeriod) != 0;
-        if (freeze && !prevFreeze) {
-            PlayEvent("onRoundFreeze", true);
-            prevKillCount = kills;
-            roundKills = 0;
-        }
-        else if (prevFreeze && !freeze) {
-            PlayEvent("onRoundStart", true);
-            prevKillCount = kills;
-            roundKills = 0;
-        }
-        prevFreeze = freeze;
-
-        int rounds = RPM<int>(rules + gOff.totalRoundsPlayed);
-        if (prevTotalRounds > 0 && rounds > prevTotalRounds) {
-            int win = RPM<int>(rules + gOff.roundWinStatus);
-            uint8_t team = RPM<uint8_t>(ctrl + gOff.teamNum);
-            if (win == team) PlayEvent("onRoundWin", true);
-            else if (win > 0 && win != team) PlayEvent("onRoundLose", true);
-            prevKillCount = kills;
-            roundKills = 0;
-        }
-        prevTotalRounds = rounds;
+        Sleep(30);
     }
 }
